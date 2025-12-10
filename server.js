@@ -28,13 +28,21 @@ app.get('/api/customers', async (req, res) => {
     }
 });
 
-// Add New Customer
+// Add New Customer (UPDATED)
 app.post('/api/customers', async (req, res) => {
     try {
-        const newCustomer = new Customer({
-            name: req.body.name,
-            mobile: req.body.mobile
+        // We now accept fatherName and city from the frontend
+        const { name, mobile, fatherName, city } = req.body;
+        
+        if (!name) return res.status(400).json({ error: "Name is required" });
+
+        const newCustomer = new Customer({ 
+            name, 
+            mobile, 
+            fatherName, 
+            city 
         });
+        
         await newCustomer.save();
         res.json(newCustomer);
     } catch (err) {
