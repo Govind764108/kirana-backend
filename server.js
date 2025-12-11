@@ -1,48 +1,74 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const { Customer, Transaction } = require('./models');
+require('dotenv').config();
 
 const app = express();
-app.use(cors());
 app.use(express.json());
+app.use(cors());
 
 // --- DATABASE CONNECTION ---
-// If this fails, it means MongoDB is not installed on your laptop.
-// We will fix that in the next step if you see an error.// Replace 'YOUR_PASSWORD_HERE' with the password you created (e.g., kirana123)
-// ↓↓↓ COPY THIS EXACTLY ↓↓↓
-const MONGO_URL = "mongodb+srv://govindjoshi_db_user:Kirana123@cluster0.irbjspy.mongodb.net/?appName=Cluster0";
-mongoose.connect(MONGO_URL)
-    .then(() => console.log("✅ Database Connected"))
-    .catch(err => console.error("❌ Database Error (Is MongoDB running?):", err));
+// Make sure your .env file has MONGODB_URI=your_connection_string
+mongoose.connect(process.env.MONGODB_URI)
+    .then(() => console.log("✅ MongoDB Connected"))
+    .catch(err => console.log(err));
 
-// --- API ROUTES ---
+// --- SCHEMAS ---
+const CustomerSchema = new mongoose.Schema({
+    name: { type: String, required: true },
+    fatherName: String,
+    city: String,
+    mobile: String,
+    createdAt: { type: Date, default: Date.now }
+});
 
-// Get All Customers
+const TransactionSchema = new mongoose.Schema({
+    customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer' },
+    type: { type: String, enum: ['GAVE_GOODS', 'GOT_PAYMENT'], required: true },
+    amount: { type: Number, required: true },
+    description: String,
+    date: { type: Date, default: Date.now }
+});
+
+const Customer = mongoose.model('Customer', CustomerSchema);
+const Transaction = mongoose.model('Transaction', TransactionSchema);
+
+// --- ROUTES ---
+
+// 1. LOGIN (Simple PIN protection)
+app.post('/api/login', (req, res) => {
+    const { pin } = req.body;
+    // HARDCODED PIN: 1234 (You can change this)
+    if (pin === "1234") {
+        res.json({ success: true, message: "Login Successful" });
+    } else {
+        res.status(401).json({ success: false, message: "Wrong PIN" });
+    }
+});
+
+// 2. GET ALL CUSTOMERS (With Calculated Totals)
 app.get('/api/customers', async (req, res) => {
     try {
-        const customers = await Customer.find().sort({ lastUpdated: -1 });
-        res.json(customers);
+        const customers = await Customer.find().sort({ name: 1 });
+        const customersWithBalance = await Promise.all(customers.map(async (c) => {
+            const txns = await Transaction.find({ customerId: c._id });
+            const totalBalance = txns.reduce((acc, t) => {
+                // If we GAVE goods, balance increases (Positive)
+                // If we GOT payment, balance decreases (Negative)
+                return t.type === 'GAVE_GOODS' ? acc + t.amount : acc - t.amount;
+            }, 0);
+            return { ...c._doc, totalBalance };
+        }));
+        res.json(customersWithBalance);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// Add New Customer (UPDATED)
+// 3. CREATE NEW CUSTOMER
 app.post('/api/customers', async (req, res) => {
     try {
-        // We now accept fatherName and city from the frontend
-        const { name, mobile, fatherName, city } = req.body;
-        
-        if (!name) return res.status(400).json({ error: "Name is required" });
-
-        const newCustomer = new Customer({ 
-            name, 
-            mobile, 
-            fatherName, 
-            city 
-        });
-        
+        const newCustomer = new Customer(req.body);
         await newCustomer.save();
         res.json(newCustomer);
     } catch (err) {
@@ -50,91 +76,68 @@ app.post('/api/customers', async (req, res) => {
     }
 });
 
-// Add Transaction
-app.post('/api/transaction', async (req, res) => {
-    const { customerId, type, amount, description } = req.body;
+// 4. [NEW] EDIT CUSTOMER
+app.put('/api/customers/:id', async (req, res) => {
     try {
-        const transaction = new Transaction({ customerId, type, amount, description });
-        await transaction.save();
+        const updatedCustomer = await Customer.findByIdAndUpdate(
+            req.params.id, 
+            req.body, 
+            { new: true } // Return the updated document
+        );
+        res.json(updatedCustomer);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to update customer" });
+    }
+});
 
-        const customer = await Customer.findById(customerId);
-        if (type === 'GAVE_GOODS') customer.totalBalance += Number(amount);
-        else customer.totalBalance -= Number(amount);
+// 5. [NEW] DELETE CUSTOMER (And their transactions)
+app.delete('/api/customers/:id', async (req, res) => {
+    try {
+        const customerId = req.params.id;
         
-        customer.lastUpdated = new Date();
-        await customer.save();
-
-        res.json({ message: "Transaction Saved", newBalance: customer.totalBalance });
+        // Step 1: Delete all transactions for this customer
+        await Transaction.deleteMany({ customerId: customerId });
+        
+        // Step 2: Delete the customer profile itself
+        await Customer.findByIdAndDelete(customerId);
+        
+        res.json({ success: true, message: "Customer and all data deleted" });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: "Failed to delete customer" });
     }
 });
-// ... existing code ...
 
-// 4. NEW: Get History for a Specific Customer
-app.get('/api/transactions/:customerId', async (req, res) => {
+// 6. GET TRANSACTIONS FOR A CUSTOMER
+app.get('/api/transactions/:id', async (req, res) => {
     try {
-        const { customerId } = req.params;
-        // Find transactions for this ID and sort by Date (Newest first)
-        const history = await Transaction.find({ customerId }).sort({ date: -1 });
-        res.json(history);
+        const transactions = await Transaction.find({ customerId: req.params.id }).sort({ date: -1 });
+        res.json(transactions);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
-// ... existing code ...
 
-// 5. NEW: Login (PIN Check)
-app.post('/api/login', (req, res) => {
-    const { pin } = req.body;
-    
-    // 🔒 MASTER PASSWORD (You can change '1234' to anything)
-    const SECRET_PIN = "1234";
-
-    if (pin === SECRET_PIN) {
-        res.json({ success: true, message: "Welcome Owner!" });
-    } else {
-        res.status(401).json({ success: false, message: "Wrong PIN" });
+// 7. ADD NEW TRANSACTION
+app.post('/api/transaction', async (req, res) => {
+    try {
+        const newTxn = new Transaction(req.body);
+        await newTxn.save();
+        res.json(newTxn);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });
 
-// Use the port Render assigns, OR use 5000 if on laptop
-const PORT = process.env.PORT || 5000;
-// ... existing code ...
-
-// 6. NEW: Delete Transaction & Fix Balance
+// 8. DELETE TRANSACTION
 app.delete('/api/transaction/:id', async (req, res) => {
     try {
-        const { id } = req.params;
-        
-        // 1. Find the transaction first (so we know how much money to reverse)
-        const txn = await Transaction.findById(id);
-        if (!txn) return res.status(404).json({ error: "Transaction not found" });
-
-        // 2. Find the Customer
-        const customer = await Customer.findById(txn.customerId);
-
-        // 3. Reverse the Math
-        // If we originally GAVE GOODS (+), we must now SUBTRACT (-)
-        // If we originally GOT PAYMENT (-), we must now ADD (+)
-        if (txn.type === 'GAVE_GOODS') {
-            customer.totalBalance -= txn.amount; 
-        } else {
-            customer.totalBalance += txn.amount;
-        }
-
-        // 4. Save changes
-        await customer.save();
-        await Transaction.findByIdAndDelete(id);
-
-        res.json({ message: "Deleted and Balance Updated" });
-
+        await Transaction.findByIdAndDelete(req.params.id);
+        res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// ... app.listen is down here ...
-app.listen(PORT, () => {
-    console.log(`🚀 Server is running on port ${PORT}`);
-});
+// --- SERVER START ---
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
